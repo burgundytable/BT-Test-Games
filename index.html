@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RC Stunt Racer - Stunt GP Tribute</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #222; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #game-ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            pointer-events: none;
+            color: white;
+            text-shadow: 2px 2px 0 #000;
+        }
+        #battery-container {
+            margin-top: 10px;
+            width: 200px;
+            height: 20px;
+            background: rgba(0,0,0,0.5);
+            border: 2px solid #fff;
+            border-radius: 10px;
+            overflow: hidden;
+            position: relative;
+        }
+        #battery-bar {
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, #ff3333, #ffff33, #33ff33);
+            transform-origin: left;
+            transition: width 0.1s linear;
+        }
+        #battery-label {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            text-align: center;
+            font-size: 12px;
+            font-weight: bold;
+            line-height: 20px;
+            color: #000;
+            text-shadow: none;
+        }
+        #speedometer {
+            font-size: 24px;
+            font-weight: bold;
+            font-style: italic;
+        }
+        #controls-hint {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: rgba(255,255,255,0.7);
+            font-size: 14px;
+            pointer-events: none;
+        }
+        #message {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 48px;
+            font-weight: bold;
+            color: #ffcc00;
+            text-shadow: 4px 4px 0 #d32f2f;
+            opacity: 0;
+            transition: opacity 0.3s;
+            pointer-events: none;
+        }
+        #stunt-indicator {
+            position: absolute;
+            top: 20%;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 24px;
+            font-weight: bold;
+            color: #00ffff;
+            text-shadow: 2px 2px 0 #000;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-ui">
+    <div id="speedometer">0 KM/H</div>
+    <div id="battery-container">
+        <div id="battery-bar"></div>
+        <div id="battery-label">BATTERY</div>
+    </div>
+</div>
+
+<div id="controls-hint">
+    ARROWS/WASD: Drive & Air Control<br>
+    SHIFT: Turbo Boost<br>
+    R: Reset Car
+</div>
+
+<div id="message">STUNT BONUS!</div>
+<div id="stunt-indicator">AIRTIME + BATTERY</div>
+
+<!-- Three.js from CDN -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<script>
+    // --- GAME CONFIGURATION ---
+    const CONFIG = {
+        gravity: 0.5,
+        maxSpeed: 1.2,
+        boostSpeed: 2.2,
+        acceleration: 0.03,
+        friction: 0.98,
+        turnSpeed: 0.04,
+        boostConsumption: 0.8, // Battery drain per frame
+        normalConsumption: 0.05,
+        rechargeRate: 1.5, // Battery gain per frame in air
+        maxBattery: 100
+    };
+
+    // --- GLOBALS ---
+    let scene, camera, renderer;
+    let car, trackMeshes = [];
+    let raycaster = new THREE.Raycaster();
+    let downVector = new THREE.Vector3(0, -1, 0);
+    
+    // Inputs
+    const keys = { w: false, a: false, s: false, d: false, shift: false, space: false };
+    
+    // Game State
+    let velocity = new THREE.Vector3();
+    let isGrounded = false;
+    let battery = 100;
+    let airTime = 0;
+    let speedDisplay = 0;
+
+    // --- INITIALIZATION ---
+    function init() {
+        // Scene Setup
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB); // Sky blue
+        scene.fog = new THREE.Fog(0x87CEEB, 50, 250);
+
+        // Camera
+        camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 10, -10);
+
+        // Renderer
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        // Lights
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(50, 100, 50);
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = 2048;
+        dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.camera.near = 0.5;
+        dirLight.shadow.camera.far = 500;
+        dirLight.shadow.camera.left = -100;
+        dirLight.shadow.camera.right = 100;
+        dirLight.shadow.camera.top = 100;
+        dirLight.shadow.camera.bottom = -100;
+        scene.add(dirLight);
+
+        // Objects
+        createTrack();
+        createCar();
+
+        // Listeners
+        window.addEventListener('resize', onWindowResize, false);
+        document.addEventListener('keydown', (e) => handleKey(e, true));
+        document.addEventListener('keyup', (e) => handleKey(e, false));
+
+        // Start Loop
+        animate();
+    }
+
+    // --- CAR CREATION ---
+    function createCar() {
+        const chassisGeo = new THREE.BoxGeometry(1.5, 0.5, 3);
+        const chassisMat = new THREE.MeshStandardMaterial({ color: 0xe74c3c }); // Red sporty color
+        
+        // Main Body
+        const chassis = new THREE.Mesh(chassisGeo, chassisMat);
+        chassis.position.y = 0.5;
+        chassis.castShadow = true;
+        
+        // Cockpit
+        const cockpitGeo = new THREE.BoxGeometry(1, 0.4, 1.5);
+        const cockpitMat = new THREE.MeshStandardMaterial({ color: 0x333333 });
+        const cockpit = new THREE.Mesh(cockpitGeo, cockpitMat);
+        cockpit.position.set(0, 0.5, -0.2);
+        chassis.add(cockpit);
+
+        // Antenna
+        const antGeo = new THREE.CylinderGeometry(0.05, 0.05, 2);
+        const antMat = new THREE.MeshStandardMaterial({ color: 0x999999 });
+        const antenna = new THREE.Mesh(antGeo, antMat);
+        antenna.position.set(0.6, 1, -1.4);
+        antenna.rotation.x = -0.2;
+        chassis.add(antenna);
+
+        // Spoiler
+        const spoilerGeo = new THREE.BoxGeometry(2, 0.1, 0.5);
+        const spoiler = new THREE.Mesh(spoilerGeo, chassisMat);
+        spoiler.position.set(0, 0.6, 1.4);
+        chassis.add(spoiler);
+
+        // Wheels
+        const wheelGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.4, 16);
+        const wheelMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+        wheelGeo.rotateZ(Math.PI / 2);
+
+        const positions = [
+            { x: -0.9, y: 0, z: 1 },
+            { x: 0.9, y: 0, z: 1 },
+            { x: -0.9, y: 0, z: -1 },
+            { x: 0.9, y: 0, z: -1 }
+        ];
+
+        positions.forEach(pos => {
+            const wheel = new THREE.Mesh(wheelGeo, wheelMat);
+            wheel.position.set(pos.x, pos.y, pos.z);
+            wheel.castShadow = true;
+            chassis.add(wheel);
+        });
+
+        car = new THREE.Group();
+        car.add(chassis);
+        scene.add(car);
+        car.position.set(0, 5, 0); // Start in air
+    }
+
+    // --- TRACK GENERATION ---
+    function createTrack() {
+        // Materials
+        const trackMat = new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.6 });
+        const grassMat = new THREE.MeshStandardMaterial({ color: 0x4caf50 });
+        const checkMat = new THREE.MeshStandardMaterial({ color: 0xffffff }); // Simple check
+        const woodMat = new THREE.MeshStandardMaterial({ color: 0x8d6e63 });
+
+        // Helper to add collider
+        function addPlatform(w, h, d, x, y, z, rotX = 0, rotY = 0, mat = trackMat) {
+            const geo = new THREE.BoxGeometry(w, h, d);
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(x, y, z);
+            mesh.rotation.x = rotX;
+            mesh.rotation.y = rotY;
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+            trackMeshes.push(mesh); // Add to collision list
+            return mesh;
+        }
+
+        // Ground Plane (Visual only, below world)
+        const groundGeo = new THREE.PlaneGeometry(500, 500);
+        groundGeo.rotateX(-Math.PI / 2);
+        const ground = new THREE.Mesh(groundGeo, grassMat);
+        ground.position.y = -20;
+        scene.add(ground);
+
+        // --- THE TRACK LAYOUT ---
+        // 1. Start Platform
+        addPlatform(30, 2, 60, 0, -1, 0);
+
+        // 2. First Jump Ramp
+        addPlatform(20, 2, 20, 0, 1, -45, -Math.PI / 8); 
+
+        // 3. Landing Area (Higher up)
+        addPlatform(40, 2, 60, 0, 5, -100);
+
+        // 4. Wide Turn Left
+        addPlatform(60, 2, 40, -40, 5, -140);
+        addPlatform(20, 2, 60, -70, 5, -100);
+
+        // 5. Downhill Slalom
+        addPlatform(20, 2, 80, -70, 0, -20, Math.PI / 12); // Slope down
+
+        // 6. Loop/Bowl Section (Bottom)
+        addPlatform(80, 2, 60, -50, -10, 50);
+
+        // 7. Crossover Ramp (Jumps over start)
+        addPlatform(20, 2, 40, -20, -10, 50, -Math.PI/6, 0); // Ramp Up
+        
+        // 8. Upper Deck
+        addPlatform(20, 2, 40, 15, 8, 50);
+        
+        // 9. Mega Jump back to start
+        addPlatform(20, 2, 20, 35, 8, 30, Math.PI/6, -Math.PI/4);
+
+        // Add some random obstacles/decor
+        addPlatform(4, 4, 4, 10, 0, 10, 0, 0, woodMat);
+        addPlatform(4, 4, 4, -10, 0, 10, 0, 0, woodMat);
+    }
+
+    // --- INPUT HANDLING ---
+    function handleKey(e, isDown) {
+        const k = e.key.toLowerCase();
+        if (k === 'w' || k === 'arrowup') keys.w = isDown;
+        if (k === 's' || k === 'arrowdown') keys.s = isDown;
+        if (k === 'a' || k === 'arrowleft') keys.a = isDown;
+        if (k === 'd' || k === 'arrowright') keys.d = isDown;
+        if (k === 'shift') keys.shift = isDown;
+        if (k === ' ') keys.space = isDown;
+        if (k === 'r' && isDown) resetCar();
+    }
+
+    function resetCar() {
+        car.position.set(0, 5, 0);
+        car.rotation.set(0, 0, 0);
+        velocity.set(0, 0, 0);
+        battery = 100;
+        updateUI();
+    }
+
+    // --- PHYSICS & GAME LOOP ---
+    function animate() {
+        requestAnimationFrame(animate);
+
+        // 1. Raycast for Ground
+        // We cast a ray from center of car downwards relative to car's orientation?
+        // Simpler for arcade: Cast straight down from slightly above car center
+        const rayOrigin = car.position.clone().add(new THREE.Vector3(0, 1, 0));
+        raycaster.set(rayOrigin, downVector);
+        const intersects = raycaster.intersectObjects(trackMeshes);
+
+        const rideHeight = 1.5; // Distance from center to ground
+        let groundNormal = new THREE.Vector3(0, 1, 0);
+
+        if (intersects.length > 0) {
+            const hit = intersects[0];
+            const dist = hit.distance;
+
+            if (dist < rideHeight + 0.5) { // Threshold to snap
+                isGrounded = true;
+                
+                // Snap to ground (smoothly)
+                const targetY = hit.point.y + (rideHeight - 1); // Adjust visual offset
+                // Soft spring effect
+                if (car.position.y < targetY) {
+                     car.position.y = targetY;
+                     if(velocity.y < 0) velocity.y = 0;
+                }
+
+                groundNormal = hit.face.normal;
+                
+                // If we hit the ground hard, bounce slightly? Nah, sticky wheels.
+            } else {
+                isGrounded = false;
+            }
+        } else {
+            isGrounded = false;
+        }
+
+        // 2. Battery & Engine Logic
+        let speed = 0;
+        let consumption = CONFIG.normalConsumption;
+        let currentMaxSpeed = CONFIG.maxSpeed;
+
+        if (battery <= 0) {
+            currentMaxSpeed *= 0.3; // Limp mode
+            consumption = 0;
+        }
+
+        if (keys.w) {
+            if (keys.shift && battery > 0) {
+                speed = CONFIG.acceleration * 2.5; // Boost accel
+                consumption = CONFIG.boostConsumption;
+                currentMaxSpeed = CONFIG.boostSpeed;
+                // Add boost shake
+                camera.position.x += (Math.random() - 0.5) * 0.1;
+            } else {
+                speed = CONFIG.acceleration;
+            }
+        } else if (keys.s) {
+            speed = -CONFIG.acceleration * 0.5;
+        }
+
+        // 3. Movement Physics
+        if (isGrounded) {
+            // -- GROUND CONTROLS --
+            
+            // Battery Drain
+            if(Math.abs(speed) > 0) battery = Math.max(0, battery - consumption);
+            
+            // Turn
+            if (keys.a) car.rotateY(CONFIG.turnSpeed * (velocity.length() * 2)); // Turn sharper at speed
+            if (keys.d) car.rotateY(-CONFIG.turnSpeed * (velocity.length() * 2));
+
+            // Apply Engine Force in direction of Car
+            const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(car.quaternion);
+            
+            // Add speed to velocity
+            velocity.add(forward.multiplyScalar(speed));
+
+            // Friction
+            velocity.multiplyScalar(CONFIG.friction);
+
+            // Align car to slope
+            // Calculate a quaternion that rotates (0,1,0) to groundNormal
+            // This is tricky to do without messing up Y rotation (yaw).
+            // Basic approach: Slerp Up vector.
+            const currentUp = new THREE.Vector3(0, 1, 0).applyQuaternion(car.quaternion);
+            const targetQuat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), groundNormal);
+            
+            // We only want to apply the pitch/roll from normal, preserving yaw.
+            // Simplified: Just tilt the car mesh slightly?
+            // Better: Raycast 3 points (Front, Left, Right) for perfect alignment. 
+            // For this single file: Simple interpolation.
+            // (Skipping complex normal alignment for stability, just relying on gravity/geometry collision)
+            
+            // Reset airtime
+            if (airTime > 60) {
+                showMessage("BIG AIR! +BATTERY");
+                battery = Math.min(100, battery + 20);
+            }
+            airTime = 0;
+            document.getElementById('stunt-indicator').style.display = 'none';
+
+        } else {
+            // -- AIR CONTROLS --
+            velocity.y -= CONFIG.gravity * 0.05; // Gravity
+            velocity.multiplyScalar(0.99); // Air resistance
+
+            // Air Control (Pitch/Roll)
+            const rotSpeed = 0.05;
+            if (keys.w) car.rotateX(rotSpeed);
+            if (keys.s) car.rotateX(-rotSpeed);
+            if (keys.a) car.rotateZ(rotSpeed); // Roll
+            if (keys.d) car.rotateZ(-rotSpeed);
+
+            airTime++;
+            if (airTime > 20) {
+                document.getElementById('stunt-indicator').style.display = 'block';
+                // Recharge
+                battery = Math.min(CONFIG.maxBattery, battery + CONFIG.rechargeRate);
+            }
+        }
+
+        // Apply Velocity
+        car.position.add(velocity);
+
+        // Kill plane
+        if (car.position.y < -30) {
+            resetCar();
+        }
+
+        // 4. Camera Follow
+        // Ideal position: behind and above car, aligned with car's Y rotation but smoothed
+        const relativeCameraOffset = new THREE.Vector3(0, 5, 10);
+        const cameraOffset = relativeCameraOffset.applyMatrix4(car.matrixWorld);
+        
+        // Smooth camera
+        camera.position.lerp(cameraOffset, 0.1);
+        camera.lookAt(car.position);
+
+        // 5. UI Update
+        speedDisplay = Math.round(velocity.length() * 50); // Fake km/h
+        updateUI();
+
+        renderer.render(scene, camera);
+    }
+
+    function updateUI() {
+        document.getElementById('speedometer').innerText = speedDisplay + " KM/H";
+        const bar = document.getElementById('battery-bar');
+        bar.style.width = battery + "%";
+        
+        // Color change based on level
+        if (battery > 50) bar.style.background = "linear-gradient(90deg, #33ff33, #33ff33)";
+        else if (battery > 20) bar.style.background = "linear-gradient(90deg, #ffff33, #ffff33)";
+        else bar.style.background = "linear-gradient(90deg, #ff3333, #ff3333)";
+    }
+
+    function showMessage(text) {
+        const msg = document.getElementById('message');
+        msg.innerText = text;
+        msg.style.opacity = 1;
+        setTimeout(() => {
+            msg.style.opacity = 0;
+        }, 1500);
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // Init
+    init();
+
+</script>
+</body>
+</html>
